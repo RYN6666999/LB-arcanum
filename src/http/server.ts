@@ -1,7 +1,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { hybridSearch, rrfFusion } from '../core/search/hybrid.ts';
 import type { SearchResult } from '../core/types.ts';
-import { embed } from '../core/embedding.ts';
+import { embed, embedBatch } from '../core/embedding.ts';
 import { operationsByName, OperationError } from '../core/operations.ts';
 import { loadConfig } from '../core/config.ts';
 import { importFromContent } from '../core/import-file.ts';
@@ -1244,10 +1244,20 @@ export function startHttpServer(engine: BrainEngine, opts: HttpServeOptions = {}
       for (const slug of slugs) {
         if (pendingEmbeds.has(slug)) continue; // already in-flight via async write path
         try {
-          const page = await engine.getPage(slug);
-          if (!page) continue;
-          const content = [page.compiled_truth, page.timeline].filter(Boolean).join('\n\n');
-          await withEmbedRetry(slug, () => importFromContent(engine, slug, content, { forceReembed: true }));
+          const chunks = await engine.getChunks(slug);
+          const unembedded = chunks.filter(c => !c.embedding);
+          if (unembedded.length === 0) continue;
+          await withEmbedRetry(slug, async () => {
+            const embeddings = await embedBatch(unembedded.map(c => c.chunk_text));
+            const updated = unembedded.map((c, i) => ({
+              chunk_index: c.chunk_index,
+              chunk_text: c.chunk_text,
+              chunk_source: c.chunk_source,
+              token_count: c.token_count ?? undefined,
+              embedding: embeddings[i],
+            }));
+            await engine.upsertChunks(slug, updated);
+          });
         } catch (e) {
           console.error(`[gbrain] embed-cron failed for ${slug}: ${e instanceof Error ? e.message : String(e)}`);
         }
