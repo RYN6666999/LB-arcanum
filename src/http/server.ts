@@ -211,9 +211,9 @@ function releaseAsyncSlot(): void {
 // the IP is banned for AUTH_BAN_MS. In-process only — resets on restart, which
 // is acceptable: an attacker would need to trigger a Railway restart to reset,
 // which is harder than just getting blocked.
-const MAX_AUTH_FAILURES = 10;
+const MAX_AUTH_FAILURES = 20;
 const AUTH_WINDOW_MS    = 60_000;   // 1 minute sliding window
-const AUTH_BAN_MS       = 3_600_000; // 1 hour ban
+const AUTH_BAN_MS       = 300_000;  // 5 minute ban (was 1 hour)
 
 interface AuthRecord { failures: number; windowStart: number; bannedUntil: number }
 const authFailures = new Map<string, AuthRecord>();
