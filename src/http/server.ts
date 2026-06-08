@@ -458,6 +458,9 @@ function authenticate(
   const queryToken = url.searchParams.get('token');
   const authHeader = req.headers.get('Authorization');
 
+  // 靜態 token 優先（讓 MCP 客戶端用 Bearer token 不需要每日 OTP）
+  if (staticToken && verifyToken(staticToken, authHeader, queryToken)) return { ok: true };
+
   // OTP 模式（當 GBRAIN_TOTP_SECRET 設定時）
   if (totpSecret) {
     const otpProvided =
@@ -468,8 +471,7 @@ function authenticate(
     return verifyOtp(totpSecret, otpProvided) ? { ok: true } : { ok: false, needOtp: true };
   }
 
-  // fallback：靜態 token
-  return verifyToken(staticToken, authHeader, queryToken) ? { ok: true } : { ok: false, needOtp: false };
+  return { ok: false, needOtp: false };
 }
 
 function makeCtx(engine: BrainEngine) {
