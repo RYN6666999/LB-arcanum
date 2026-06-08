@@ -6,6 +6,8 @@ import { operationsByName, OperationError } from '../core/operations.ts';
 import { loadConfig } from '../core/config.ts';
 import { importFromContent } from '../core/import-file.ts';
 import { createHash, createHmac, randomBytes } from 'crypto';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { createMcpServer } from '../mcp/server.ts';
 import pkg from '../../package.json' with { type: 'json' };
 
 // ── Chunked upload buffer ─────────────────────────────────────────────────────
@@ -504,6 +506,26 @@ export function startHttpServer(engine: BrainEngine, opts: HttpServeOptions = {}
       const path = url.pathname;
       const t0 = Date.now();
       markRequest();
+
+      // ── MCP Streamable HTTP endpoint ──────────────────────────────────────
+      // Implements the MCP 2025-03-26 Streamable HTTP transport spec.
+      // Compatible with Genspark, Claude.ai connectors, and any MCP client.
+      // Auth: same token/OTP as the REST API (Authorization: Bearer <token>).
+      if (path === '/mcp') {
+        const auth = authenticate(req, url, staticToken, totpSecret);
+        if (!auth.ok) {
+          return Response.json(
+            { error: 'unauthorized', message: auth.needOtp ? 'OTP required' : 'Invalid token' },
+            { status: 401 }
+          );
+        }
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          sessionIdGenerator: undefined, // stateless — no session management needed
+        });
+        const mcpServer = createMcpServer(engine);
+        await mcpServer.connect(transport);
+        return transport.handleRequest(req);
+      }
 
       // ── health (no auth) ──────────────────────────────────────────────────
       // `warm` flips true after the first successful query (embedding pool

@@ -27,20 +27,21 @@ function validateParams(op: Operation, params: Record<string, unknown>): string 
   return null;
 }
 
-export async function startMcpServer(engine: BrainEngine) {
+/**
+ * Create and configure an MCP Server instance wired to the given engine.
+ * Does NOT connect to any transport — callers attach the transport they need
+ * (StdioServerTransport for CLI, WebStandardStreamableHTTPServerTransport for HTTP).
+ */
+export function createMcpServer(engine: BrainEngine): Server {
   const server = new Server(
     { name: 'gbrain', version: VERSION },
     { capabilities: { tools: {} } },
   );
 
-  // Generate tool definitions from operations. Extracted to buildToolDefs so
-  // the subagent tool registry (v0.15+) can call the same mapper against a
-  // filtered OPERATIONS subset instead of duplicating this shape.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: buildToolDefs(operations),
   }));
 
-  // Dispatch tool calls to operation handlers
   server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
     const { name, arguments: params } = request.params;
     const op = operations.find(o => o.name === name);
@@ -57,7 +58,6 @@ export async function startMcpServer(engine: BrainEngine) {
         error: (msg: string) => process.stderr.write(`[error] ${msg}\n`),
       },
       dryRun: !!(params?.dry_run),
-      // MCP stdio callers are remote/untrusted; enforce strict file confinement.
       remote: true,
     };
 
@@ -79,6 +79,11 @@ export async function startMcpServer(engine: BrainEngine) {
     }
   });
 
+  return server;
+}
+
+export async function startMcpServer(engine: BrainEngine) {
+  const server = createMcpServer(engine);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -100,7 +105,6 @@ export async function handleToolCall(
     config: loadConfig() || { engine: 'postgres' },
     logger: { info: console.log, warn: console.warn, error: console.error },
     dryRun: !!(params?.dry_run),
-    // Backing path for `gbrain call` CLI command — trusted local invocation.
     remote: false,
   };
 
