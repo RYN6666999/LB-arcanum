@@ -7,6 +7,7 @@ RUN bun install
 COPY . .
 
 # Build a self-contained Linux x64 binary
+# cache-bust: 2026-06-08
 RUN bun build --compile --target=bun-linux-x64 \
     --outfile /app/bin/gbrain src/cli.ts
 
