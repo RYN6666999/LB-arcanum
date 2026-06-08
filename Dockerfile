@@ -1,13 +1,12 @@
 FROM oven/bun:1 AS builder
 WORKDIR /app
 
-COPY package.json ./
-RUN bun install
+COPY package.json bun.lockb* ./
+RUN bun install --frozen-lockfile
 
 COPY . .
 
 # Build a self-contained Linux x64 binary
-# cache-bust: 2026-06-08
 RUN bun build --compile --target=bun-linux-x64 \
     --outfile /app/bin/gbrain src/cli.ts
 
