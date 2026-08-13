@@ -22,6 +22,13 @@ for (const op of operations) {
 const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'http-serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'dream', 'check-resolvable']);
 
 async function main() {
+  // 2026-08-13 病灶修正：gbrain embedding 的 `new OpenAI()` 讀 env OPENAI_BASE_URL。
+  // 全域 ~/.zshrc 把它導到 genspark proxy（該 proxy /embeddings 回 401 → embedding.ts 指數
+  // 重試 4s~120s×5 放大 → 20s timeout → 退純 lex → 自然問句召回≈0）。在此（gbrain 自身
+  // 啟動處）強制覆寫回 api.openai.com，只動 gbrain、不動全域。embedding.ts 是 lazy 建
+  // client，啟動時設 env 就會被讀到。
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1';
+
   // Parse global flags (--quiet / --progress-json / --progress-interval)
   // BEFORE command dispatch, so `gbrain --progress-json doctor` works.
   // The stripped argv is what the command sees.
