@@ -11,9 +11,10 @@
 
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
-import type { SearchResult, SearchOpts } from '../types.ts';
+import type { SearchResult, SearchOpts, Chunk } from '../types.ts';
 import { embed } from '../embedding.ts';
 import { dedupResults } from './dedup.ts';
+import { sentenceSig, ternaryCosine } from './ternary.ts';
 import { autoDetectDetail } from './intent.ts';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
@@ -128,6 +129,105 @@ export function applyTagBoost(
   }
 }
 
+/**
+ * 三進制重排 — 對候選集合做錯字/同義容錯拉分。
+ *
+ * 原理：ts_rank('simple') 對中文逐字拆，「汽候」vs「氣候」會拆開搜不到。
+ * 三進制簽名靠字元/雙字元重疊，錯字/同義仍保有高 cosine。
+ * 本函數對每個候選 chunk 算 query 的三進制 cosine，做溫和 boost：
+ *   - cosine 未過門檻（虛假相關噪音）：＊1.0 不變
+ *   - 超過門檻：原始 score 混合重排序，拉高字元重疊者
+ *
+ * 保守設計：只 boost 不壓抑，不會把真正無關的排到前面。失敗由呼叫端吞掉。
+ */
+const TERNARY_BOOST_THRESHOLD = 0.25;  // 低門檻，只護住「有字元重疊」的候選
+const TERNARY_BOOST_STRENGTH = 0.4;    // boost 幅度上限（0..1）
+
+export function applyTernaryRescore(results: SearchResult[], query: string): void {
+  if (results.length === 0 || !query.trim()) return;
+
+  const querySig = sentenceSig(query);
+  // 補償式 boost：不壓抑原始分數，只在三進制 cosine 高時加分碼。
+  // 錯字/同義的候選，原始 ts_rank 給低分，但三進制揭示高字元重疊 → 拉回。
+  // 完全無關的 cosine 低 → 不變，保持原始排序。
+  const boosts = results.map((r) => {
+    const cosine = ternaryCosine(querySig, sentenceSig(r.chunk_text.slice(0, 200)));
+    const excess = cosine - TERNARY_BOOST_THRESHOLD; // 超過門檻的部分才算 bonus
+    if (excess <= 0) return r.score;
+    // bonus = 超出門檻比例 × 強度，疊加到原始分數（不放縮）
+    return r.score * (1 + TERNARY_BOOST_STRENGTH * excess);
+  });
+
+  for (let i = 0; i < results.length; i++) {
+    results[i].score = boosts[i];
+  }
+}
+
+/**
+ * 三進制全庫召回 fallback — 當關鍵字 + 向量都撈不到候選（錯字/同義完全落空）時救回。
+ *
+ * 為什麼要這層：錯字查詢（如「拼牌定位」）在 ts_rank 可能完全 0 命中，重排層
+ * (`applyTernaryRescore`) 只在「已有候選」內 boost，搆不到沒進候選的內容。
+ *
+ * 高效策略（避免雲端 DB 全表 chunk 掃描）：先拉全庫「頁 title」（輕量單欄），
+ * 對 query 算 title 級三進制 cosine 找出錯字相近頁；命中頁再個別撈 chunk。
+ * 這樣只查幾百個 title 字串，不拉整庫 chunk，雲端 Postgres 也快。
+ */
+const TERNARY_TITLE_THRESHOLD = 0.28;   // title 級召迴門檻：需真有字元重疊
+const TERNARY_RECALL_MAX = 8;
+
+export async function ternaryFallbackSearch(
+  engine: BrainEngine,
+  query: string,
+  limit: number,
+): Promise<SearchResult[]> {
+  if (!query.trim()) return [];
+
+  let titles: { slug: string; title: string }[] = [];
+  try {
+    titles = await engine.getAllPageTitles();
+  } catch {
+    return []; // 全掃失敗不致命
+  }
+  if (titles.length === 0) return [];
+
+  const querySig = sentenceSig(query);
+  // 對每頁 title 算三進制 cosine，找出錯字相近的候選頁
+  const candidates = titles
+    .map((p) => ({ ...p, sim: ternaryCosine(querySig, sentenceSig(p.title)) }))
+    .filter((p) => p.sim >= TERNARY_TITLE_THRESHOLD)
+    .sort((a, b) => b.sim - a.sim)
+    .slice(0, TERNARY_RECALL_MAX);
+
+  if (candidates.length === 0) return [];
+
+  // 對候選頁撈 chunk，取每頁最好的一塊
+  const results: SearchResult[] = [];
+  for (const c of candidates) {
+    try {
+      const chunks = await engine.getChunks(c.slug);
+      if (chunks.length === 0) continue;
+      const best = chunks[0]; // 首塊通常具代表性
+      results.push({
+        slug: c.slug,
+        page_id: best.page_id,
+        title: c.title,
+        type: 'concept',
+        chunk_text: best.chunk_text,
+        chunk_source: best.chunk_source === 'timeline' ? 'timeline' : 'compiled_truth',
+        chunk_id: best.id,
+        chunk_index: best.chunk_index,
+        score: c.sim,
+        stale: false,
+      });
+    } catch {
+      // 單頁失敗跳過
+    }
+  }
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, Math.min(limit, TERNARY_RECALL_MAX));
+}
+
 export interface HybridSearchOpts extends SearchOpts {
   expansion?: boolean;
   expandFn?: (query: string) => Promise<string[]>;
@@ -181,7 +281,11 @@ export async function hybridSearch(
         // Boost failure is non-fatal: keep unboosted ranking.
       }
     }
-    return dedupResults(keywordResults).slice(offset, offset + limit);
+    // KEY-only 路徑：keyword 撈不到時改走三進制全庫召回（錯字容錯）
+    if (keywordResults.length > 0) {
+      return dedupResults(keywordResults).slice(offset, offset + limit);
+    }
+    return await ternaryFallbackSearch(engine, query, limit);
   }
 
   // Determine query variants (optionally with expansion)
@@ -211,7 +315,11 @@ export async function hybridSearch(
   }
 
   if (vectorLists.length === 0) {
-    return dedupResults(keywordResults).slice(offset, offset + limit);
+    // vector 不可用/失敗：keyword 撈不到時改走三進制全庫召回（錯字容錯）
+    if (keywordResults.length > 0) {
+      return dedupResults(keywordResults).slice(offset, offset + limit);
+    }
+    return await ternaryFallbackSearch(engine, query, limit);
   }
 
   // Merge all result lists via RRF (includes normalization + boost)
@@ -250,6 +358,18 @@ export async function hybridSearch(
   // Auto-escalate: if detail=low returned 0, retry with high
   if (deduped.length === 0 && opts?.detail === 'low') {
     return hybridSearch(engine, query, { ...opts, detail: 'high' });
+  }
+
+  // 三進制重排：在中段（dedup 後）對錯字/同義漏網做溫和拉分。
+  // 這支在候選集合上重新算三進制 cosine，把「ts_rank 給低分但字元重疊高」
+  // 的 chunk 往上拉，解決中文錯字/同義搜不到。只在有明顯字元重疊時生效。
+  if (deduped.length > 0) {
+    try {
+      applyTernaryRescore(deduped, query);
+      deduped.sort((a, b) => b.score - a.score);
+    } catch {
+      // 三進制重排失敗不致命：保留原排序。
+    }
   }
 
   return deduped.slice(offset, offset + limit);

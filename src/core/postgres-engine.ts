@@ -406,6 +406,36 @@ export class PostgresEngine implements BrainEngine {
     return rows.map((r) => rowToChunk(r as Record<string, unknown>));
   }
 
+  async getAllChunks(): Promise<(Chunk & { slug: string; title: string })[]> {
+    const sql = this.sql;
+    // 只選三進制召回需要的文字欄位，不拉 embedding（避免雲端 DB 全量向量傳輸拖垮查詢）
+    const rows = await sql`
+      SELECT cc.id, cc.page_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+             cc.model, cc.token_count,
+             NULL::float8[] AS embedding, NULL::timestamptz AS embedded_at,
+             p.slug, p.title
+      FROM content_chunks cc
+      JOIN pages p ON p.id = cc.page_id
+      ORDER BY cc.id
+    `;
+    return (rows as Record<string, unknown>[]).map((r) => ({
+      ...rowToChunk(r),
+      slug: String(r.slug),
+      title: String(r.title) || '',
+    }));
+  }
+
+  async getAllPageTitles(): Promise<{ slug: string; title: string }[]> {
+    const sql = this.sql;
+    const rows = await sql`
+      SELECT slug, COALESCE(title, slug) AS title FROM pages ORDER BY id
+    `;
+    return (rows as Record<string, unknown>[]).map((r) => ({
+      slug: String(r.slug),
+      title: String(r.title),
+    }));
+  }
+
   async deleteChunks(slug: string): Promise<void> {
     const sql = this.sql;
     await sql`

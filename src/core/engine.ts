@@ -80,6 +80,10 @@ export interface BrainEngine {
   // Chunks
   upsertChunks(slug: string, chunks: ChunkInput[]): Promise<void>;
   getChunks(slug: string): Promise<Chunk[]>;
+  /** 返回全庫所有 chunk（含所屬 slug/title），供三進制全庫召回等全掃用途。 */
+  getAllChunks(): Promise<(Chunk & { slug: string; title: string })[]>;
+  /** 返回全庫所有頁的 (slug, title)，輕量（不拉 chunk/embedding），供錯字 title 召回。 */
+  getAllPageTitles(): Promise<{ slug: string; title: string }[]>
   deleteChunks(slug: string): Promise<void>;
   /** Returns distinct page slugs that have at least one chunk with a NULL embedding. */
   getUnembeddedSlugs(limit: number): Promise<string[]>;
